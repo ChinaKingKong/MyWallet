@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"mywallet/internal/models"
@@ -124,4 +125,72 @@ func (r *PostgresRepository) GetTransactions(ctx context.Context, address string
 	}
 
 	return transactions, rows.Err()
+}
+
+func (r *PostgresRepository) AddBalance(ctx context.Context, address string, amount decimal.Decimal) error {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin transaction failed: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 使用 FOR UPDATE 子句锁定行
+	var currentBalance decimal.Decimal
+	err = tx.QueryRowContext(ctx, 
+		"SELECT balance FROM wallets WHERE address = $1 FOR UPDATE", 
+		address).Scan(&currentBalance)
+	
+	if err == sql.ErrNoRows {
+		// 如果钱包不存在，创建新钱包
+		_, err = tx.ExecContext(ctx,
+			"INSERT INTO wallets (address, balance) VALUES ($1, $2)",
+			address, amount)
+	} else if err == nil {
+		// 更新现有钱包余额
+		_, err = tx.ExecContext(ctx,
+			"UPDATE wallets SET balance = balance + $1 WHERE address = $2",
+			amount, address)
+	}
+	
+	if err != nil {
+		return fmt.Errorf("update balance failed: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+func (r *PostgresRepository) SubBalance(ctx context.Context, address string, amount decimal.Decimal) error {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin transaction failed: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 使用 FOR UPDATE 子句锁定行并检查余额
+	var currentBalance decimal.Decimal
+	err = tx.QueryRowContext(ctx, 
+		"SELECT balance FROM wallets WHERE address = $1 FOR UPDATE", 
+		address).Scan(&currentBalance)
+	
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("wallet not found")
+	} else if err != nil {
+		return fmt.Errorf("query balance failed: %w", err)
+	}
+
+	// 检查余额是否足够
+	if currentBalance.LessThan(amount) {
+		return fmt.Errorf("insufficient balance")
+	}
+
+	// 更新余额
+	_, err = tx.ExecContext(ctx,
+		"UPDATE wallets SET balance = balance - $1 WHERE address = $2",
+		amount, address)
+	
+	if err != nil {
+		return fmt.Errorf("update balance failed: %w", err)
+	}
+
+	return tx.Commit()
 }

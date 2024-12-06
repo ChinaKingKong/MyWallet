@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"mywallet/internal/config"
 	"mywallet/internal/models"
 	"mywallet/internal/repository"
 	"mywallet/pkg/logger"
@@ -65,23 +66,30 @@ func (m *MockRedisRepository) GetCachedTransactions(ctx context.Context, address
 	return args.Get(0).([]models.Transaction), args.Error(1)
 }
 
-func TestDeposit(t *testing.T) {
-	// 设置
-	ctx := context.Background()
+func GetService(t *testing.T) (*WalletService, error) {
 	logger := logger.NewLogger()
-	mockPostgres, err := repository.NewPostgresRepository("localhost", logger)
+	cfg, _ := config.Load()
+	mockPostgres, err := repository.NewPostgresRepository(cfg.PostgresURL, logger)
 	if err != nil {
 		t.Fatalf("failed to create postgres repository: %v", err) // 错误处理
 	}
-	mockRedis, err := repository.NewRedisRepository("localhost", logger)
+	mockRedis, err := repository.NewRedisRepository(cfg.PostgresURL, logger)
 	if err != nil {
-		t.Fatalf("failed to create redis repository: %v", err) // 错误处理
+		t.Fatalf("failed to create postgres repository: %v", err) // 错误处理
 	}
-
-	service, err := NewWalletService(logger, "https://api.devnet.solana.com",
-		mockPostgres,
-		mockRedis)
+	service, err := NewWalletService(logger, cfg.SolanaRPC,
+		mockPostgres, mockRedis)
 	assert.NoError(t, err)
+	return service, nil
+}
+
+func TestDeposit(t *testing.T) {
+	// 设置
+	ctx := context.Background()
+	service, err := GetService(t)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err) // 错误处理
+	}
 
 	validAddress := solana.NewWallet().PublicKey().String()
 	amount := decimal.NewFromFloat(1.0)
@@ -94,20 +102,10 @@ func TestDeposit(t *testing.T) {
 func TestGetBalance(t *testing.T) {
 	// 设置
 	ctx := context.Background()
-	logger := logger.NewLogger()
-	mockPostgres, err := repository.NewPostgresRepository("localhost", logger)
+	service, err := GetService(t)
 	if err != nil {
-		t.Fatalf("failed to create postgres repository: %v", err) // 错误处理
+		t.Fatalf("failed to create service: %v", err) // 错误处理
 	}
-	mockRedis, err := repository.NewRedisRepository("localhost", logger)
-	if err != nil {
-		t.Fatalf("failed to create redis repository: %v", err) // 错误处理
-	}
-
-	service, err := NewWalletService(logger, "https://api.devnet.solana.com",
-		(*repository.PostgresRepository)(mockPostgres),
-		(*repository.RedisRepository)(mockRedis))
-	assert.NoError(t, err)
 
 	validAddress := solana.NewWallet().PublicKey().String()
 	expectedBalance := decimal.NewFromFloat(1.0)
@@ -121,20 +119,10 @@ func TestGetBalance(t *testing.T) {
 func TestGetTransactions(t *testing.T) {
 	// 设置
 	ctx := context.Background()
-	logger := logger.NewLogger()
-	mockPostgres, err := repository.NewPostgresRepository("localhost", logger)
+	service, err := GetService(t)
 	if err != nil {
-		t.Fatalf("failed to create postgres repository: %v", err) // 错误处理
+		t.Fatalf("failed to create service: %v", err) // 错误处理
 	}
-	mockRedis, err := repository.NewRedisRepository("localhost", logger)
-	if err != nil {
-		t.Fatalf("failed to create redis repository: %v", err) // 错误处理
-	}
-
-	service, err := NewWalletService(logger, "https://api.devnet.solana.com",
-		(*repository.PostgresRepository)(mockPostgres),
-		(*repository.RedisRepository)(mockRedis))
-	assert.NoError(t, err)
 
 	validAddress := solana.NewWallet().PublicKey().String()
 	expectedTxs := []models.Transaction{

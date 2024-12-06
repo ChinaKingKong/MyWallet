@@ -51,8 +51,20 @@ func (s *WalletService) Deposit(ctx context.Context, address string, amount deci
 		return fmt.Errorf("invalid address: %w", err)
 	}
 
+	err := s.redis.AddBalance(ctx, address, amount)
+	if err != nil {
+		return fmt.Errorf("failed to update redis balance: %w", err)
+	}
+
 	// 更新数据库余额
-	if err := s.postgres.UpdateBalance(ctx, address, amount); err != nil {
+	if err := s.postgres.AddBalance(ctx, address, amount); err != nil {
+		// Redis 回滚
+		err := s.redis.SubBalance(ctx, address, amount)
+		if err != nil {
+			s.logger.Logger.Error("failed to rollback redis balance",
+				zap.String("address", address),
+				zap.Error(err))
+		}
 		return fmt.Errorf("failed to update balance: %w", err)
 	}
 
@@ -71,12 +83,6 @@ func (s *WalletService) Deposit(ctx context.Context, address string, amount deci
 	if err := s.postgres.CreateTransaction(ctx, tx); err != nil {
 		return fmt.Errorf("failed to create transaction: %w", err)
 	}
-
-	// 清除缓存
-	if err := s.redis.CacheWallet(ctx, nil); err != nil {
-		s.logger.Logger.Error("failed to clear wallet cache", zap.Error(err))
-	}
-
 	return nil
 }
 
@@ -85,26 +91,10 @@ func (s *WalletService) GetBalance(ctx context.Context, address string) (decimal
 	if _, err := solana.PublicKeyFromBase58(address); err != nil {
 		return decimal.Zero, fmt.Errorf("invalid address: %w", err)
 	}
-
-	// 先查缓存
-	if wallet, err := s.redis.GetCachedWallet(ctx, address); err == nil && wallet != nil {
-		return wallet.Balance, nil
-	}
-
 	// 查询Solana实时余额
 	balance, err := s.solana.GetBalance(ctx, address)
 	if err != nil {
 		return decimal.Zero, fmt.Errorf("failed to get balance: %w", err)
-	}
-
-	// 更新缓存
-	wallet := &models.Wallet{
-		Address:   address,
-		Balance:   balance,
-		UpdatedAt: time.Now(),
-	}
-	if err := s.redis.CacheWallet(ctx, wallet); err != nil {
-		s.logger.Logger.Error("failed to cache wallet", zap.Error(err))
 	}
 
 	return balance, nil
@@ -114,11 +104,6 @@ func (s *WalletService) GetTransactions(ctx context.Context, address string) ([]
 	// 验证地址
 	if _, err := solana.PublicKeyFromBase58(address); err != nil {
 		return nil, fmt.Errorf("invalid address: %w", err)
-	}
-
-	// 先查缓存
-	if txs, err := s.redis.GetCachedTransactions(ctx, address); err == nil && txs != nil {
-		return txs, nil
 	}
 
 	// 查询数据库获取本地交易记录
@@ -157,7 +142,7 @@ func (s *WalletService) GetTransactions(ctx context.Context, address string) ([]
 			return dbTxs, nil
 		}
 
-		// 获取交易签名
+		// 获取交易名
 		signature := transaction.Signatures[0]
 
 		// 获取账户信息
@@ -198,11 +183,6 @@ func (s *WalletService) GetTransactions(ctx context.Context, address string) ([]
 	allTxs = append(allTxs, dbTxs...)
 	allTxs = append(allTxs, chainTxModels...)
 
-	// 更新缓存
-	if err := s.redis.CacheTransactions(ctx, address, allTxs); err != nil {
-		s.logger.Logger.Error("failed to cache transactions", zap.Error(err))
-	}
-
 	return allTxs, nil
 }
 
@@ -240,7 +220,6 @@ func (s *WalletService) Transfer(ctx context.Context, fromPrivateKeyStr, toAddre
 
 	// 获取发送方公钥
 	fromAddress := fromPrivateKey.PublicKey().String()
-
 	// 解析接收方地址
 	toPubKey, err := solana.PublicKeyFromBase58(toAddress)
 	if err != nil {
@@ -267,22 +246,22 @@ func (s *WalletService) Transfer(ctx context.Context, fromPrivateKeyStr, toAddre
 		return fmt.Errorf("failed to execute transfer on blockchain: %w", err)
 	}
 
+	// Lua 脚本执行转账
+	err = s.redis.Transfer(ctx, fromAddress, toAddress, amount)
+	if err != nil {
+		return fmt.Errorf("failed to execute redis transfer: %w", err)
+	}
+
 	// 开始转账操作
 	// 1. 扣除发送方余额
-	if err := s.postgres.UpdateBalance(ctx, fromAddress, amount.Neg()); err != nil {
-		s.logger.Logger.Error("failed to update sender balance",
-			zap.String("from", fromAddress),
-			zap.Error(err))
+	if err := s.postgres.SubBalance(ctx, fromAddress, amount); err != nil {
 		return fmt.Errorf("failed to update sender balance: %w", err)
 	}
 
 	// 2. 增加接收方余额
-	if err := s.postgres.UpdateBalance(ctx, toAddress, amount); err != nil {
-		s.logger.Logger.Error("failed to update receiver balance",
-			zap.String("to", toAddress),
-			zap.Error(err))
-		// 回滚发送方余额
-		if rollbackErr := s.postgres.UpdateBalance(ctx, fromAddress, amount); rollbackErr != nil {
+	if err := s.postgres.AddBalance(ctx, toAddress, amount); err != nil {
+		// 如果增加接收方余额失败，需要恢复发送方余额
+		if rollbackErr := s.postgres.AddBalance(ctx, fromAddress, amount); rollbackErr != nil {
 			s.logger.Logger.Error("failed to rollback sender balance",
 				zap.String("from", fromAddress),
 				zap.Error(rollbackErr))
@@ -307,9 +286,58 @@ func (s *WalletService) Transfer(ctx context.Context, fromPrivateKeyStr, toAddre
 		return fmt.Errorf("failed to create transaction record: %w", err)
 	}
 
-	// 4. 清除相关缓存
-	if err := s.redis.CacheWallet(ctx, nil); err != nil {
-		s.logger.Logger.Error("failed to clear wallet cache", zap.Error(err))
+	return nil
+}
+
+func (s *WalletService) Withdraw(ctx context.Context, address string, amount decimal.Decimal) error {
+	// 验证金额
+	if amount.LessThanOrEqual(decimal.Zero) {
+		return fmt.Errorf("withdraw amount must be greater than 0")
+	}
+
+	// 验证地址
+	if _, err := solana.PublicKeyFromBase58(address); err != nil {
+		return fmt.Errorf("invalid address: %w", err)
+	}
+
+	// 执行 Lua 脚本检查和扣减余额
+	err := s.redis.SubBalance(ctx, address, amount)
+	if err != nil {
+		return fmt.Errorf("failed to update redis balance: %w", err)
+	}
+
+	// 更新数据库余额
+	if err := s.postgres.SubBalance(ctx, address, amount); err != nil {
+		// Redis 回滚
+		rollbackErr := s.redis.AddBalance(ctx, address, amount)
+		if rollbackErr != nil {
+			s.logger.Logger.Error("failed to rollback redis balance",
+				zap.String("address", address),
+				zap.Error(rollbackErr))
+		}
+		return fmt.Errorf("failed to update balance: %w", err)
+	}
+
+	// 创建交易记录
+	tx := &models.Transaction{
+		ID:          solana.NewWallet().PublicKey().String(), // 使用随机公钥作为ID
+		FromWallet:  address,
+		ToWallet:    "withdraw",
+		Amount:      amount,
+		Type:        "withdraw",
+		Status:      "completed",
+		CreatedAt:   time.Now(),
+		CompletedAt: time.Now(),
+	}
+
+	if err := s.postgres.CreateTransaction(ctx, tx); err != nil {
+		// 如果创建交易记录失败，回滚余额
+		if rollbackErr := s.postgres.AddBalance(ctx, address, amount); rollbackErr != nil {
+			s.logger.Logger.Error("failed to rollback balance after transaction creation failure",
+				zap.String("address", address),
+				zap.Error(rollbackErr))
+		}
+		return fmt.Errorf("failed to create transaction: %w", err)
 	}
 
 	return nil

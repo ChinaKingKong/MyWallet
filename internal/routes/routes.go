@@ -2,6 +2,8 @@ package routes
 
 import (
 	"mywallet/internal/api"
+	"mywallet/internal/config"
+	"mywallet/pkg/logger"
 	"net/http"
 
 	"github.com/gin-contrib/sessions"
@@ -24,12 +26,17 @@ func InitRouter() *gin.Engine {
 
 // 初始化App应用路由
 func InitAppRouter(r *gin.Engine) {
-	app_api := r.Group("api/app")
+	app_api := r.Group("api/wallet")
 	{
-		app_api.POST("/wallet/deposit", api.Deposit)
-		app_api.POST("/wallet/withdraw", api.Withdraw)
-		app_api.POST("/wallet/transfer", api.Transfer)
-		app_api.GET("/wallet/balance/:address", api.GetBalance)
-		app_api.GET("/wallet/transactions/:address", api.GetTransactions)
+		cfg, _ := config.Load()
+		logger := logger.NewLogger()
+		server := api.NewServer(cfg, logger)
+		if server != nil {
+			app_api.POST("/deposit", server.Deposit)
+			app_api.POST("/withdraw", server.Withdraw)
+			app_api.POST("/transfer", server.Transfer)
+			app_api.GET("/balance/:address", server.GetBalance)
+			app_api.GET("/transactions/:address", server.GetTransactions)
+		}
 	}
 }
