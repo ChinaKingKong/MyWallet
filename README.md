@@ -1,6 +1,6 @@
-# 数字钱包服务
+# MyWallet钱包服务
 
-一个基于 Go 语言实现的高性能数字钱包微服务，提供账户余额管理和交易处理功能。
+一个基于 Go 语言实现的高性能数字钱包微服务，提供账户余额管理和转账处理功能。
 
 ## 功能特点
 
@@ -17,33 +17,8 @@
 - Redis
 - Gin Web 框架
 - 标准库 context 用于超时控制
-- 标准库 sync 用于并发控制
-
-## 快速开始
-
-### 前置要求
-
-- Go 1.20 或更高版本
-- Redis 服务器
-
-### 安装
-
-```
-
-### 配置
-
-在 `internal/config` 目录下创建 `config.yaml`:
-
-```yaml
-redis:
-  addr: "localhost:6379"
-  password: ""
-  db: 0
-
-server:
-  port: 8080
-  timeout: 5s
-```
+- 标准库 sync 用于并发控制 
+ 
 
 ### 运行
 
